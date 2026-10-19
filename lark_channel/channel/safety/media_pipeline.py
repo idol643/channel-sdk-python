@@ -78,6 +78,11 @@ class MediaPipelineManager:
     def enabled(self) -> bool:
         return self._config.enabled
 
+    @property
+    def merges_text(self) -> bool:
+        """Whether a follow-up text message may be folded into a batch."""
+        return self._config.enabled and self._config.merge_text
+
     def is_compatible(self, msg: InboundMessage) -> bool:
         kind = _kind_of(msg)
         return self._config.enabled and kind in self._config.compatible_kinds
@@ -122,6 +127,52 @@ class MediaPipelineManager:
         keys_to_flush = [k for k in list(self._buckets.keys()) if k[0] == chat_id]
         for k in keys_to_flush:
             await self._flush_bucket(k)
+
+    async def merge_text_into_pending(self, msg: InboundMessage) -> bool:
+        """Fold ``msg`` (a text message) into a pending bucket and dispatch it.
+
+        Returns ``True`` when the message was absorbed, which means the batch
+        has been handed to the handler and the caller must stop — pushing the
+        text down the normal text-batch path as well would answer twice.
+        ``False`` means "nothing pending in this chat, treat me normally".
+
+        Bucket selection prefers the bucket whose ``(reply_to, thread_id)``
+        matches the text message, so a question asked inside a topic folds into
+        that topic's attachments rather than into whichever bucket happened to
+        be created first. Buckets left in the chat (a different media kind) are
+        NOT merged here: they keep their own timer, i.e. the previous
+        "different kind flushes separately" semantics.
+
+        The carrier is the text message (``_attach_sources_to_last`` takes the
+        last source), so ``content`` is the text and ``batched_sources`` holds
+        the media plus the text in arrival order.
+        """
+        chat_id = msg.conversation.chat_id or ""
+        keys = [k for k in list(self._buckets.keys()) if k[0] == chat_id]
+        if not keys:
+            return False
+        reply_to = msg.reply.message_id if msg.reply else ""
+        thread_id = getattr(msg.conversation, "thread_id", "") or ""
+        same = [k for k in keys if k[2] == reply_to and k[3] == thread_id]
+
+        def _last_seen(key: Tuple[str, str, str, str]) -> int:
+            bucket = self._buckets.get(key)
+            if bucket is None or not bucket.sources:
+                return -1
+            return int(getattr(bucket.sources[-1], "create_time", 0) or 0)
+
+        # Same thread/reply first; within that set (or with no match at all)
+        # the most recently active bucket wins, because the text is about the
+        # attachment the user just sent.
+        key = max(same or keys, key=_last_seen)
+        bucket = self._buckets.pop(key, None)
+        if bucket is None or not bucket.sources:
+            return False
+        self._cancel_timer(bucket)
+        merged = _attach_sources_to_last(list(bucket.sources) + [msg])
+        if self._handler is not None:
+            await self._handler(merged)
+        return True
 
     async def _flush_bucket(self, key: Tuple[str, str, str, str]) -> None:
         bucket = self._buckets.pop(key, None)

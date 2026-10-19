@@ -206,9 +206,18 @@ class SafetyPipeline:
             await self._media.push(msg, self._media_flush_handler)
             return
 
-        # Non-media (or non-compatible kind): flush any pending media bucket
-        # in this chat first so order is preserved across the kind switch.
+        # Non-media (or non-compatible kind). With ``merge_text`` on, a pending
+        # media bucket in this chat absorbs this message first — that is how
+        # "attach a file, then say what to do with it" becomes one dispatch
+        # instead of two turns. The fold must happen before the generic flush
+        # below, and it returns here because the batch was already dispatched
+        # (falling through would also push the same text down the text-batch
+        # path and answer twice).
         if self._media.enabled:
+            if self._media.merges_text and await self._media.merge_text_into_pending(msg):
+                return
+            # Otherwise flush any pending media bucket in this chat first so
+            # order is preserved across the kind switch (unchanged behaviour).
             await self._media.flush_incompatible_for(msg)
 
         # 5a. batch + serialize (or direct if queue disabled)

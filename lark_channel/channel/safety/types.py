@@ -91,6 +91,24 @@ class MediaBatchConfig:
     compatible_kinds: frozenset = field(
         default_factory=lambda: frozenset({"image", "file", "audio", "video"})
     )
+    merge_text: bool = False
+    """Fold a follow-up **text** message into the pending media batch.
+
+    ``False`` (default) keeps the pre-existing behaviour: a text message in the
+    same chat flushes the pending batch and is dispatched on its own, so
+    "send a file, then type what to do with it" reaches the handler as two
+    dispatches (two turns for a chat bot).
+
+    ``True`` appends that text to the pending batch instead, producing **one**
+    dispatch whose ``batched_sources`` is ``[<media>…, <text>]`` and whose
+    ``content`` is the text message's (the carrier is the last source). That is
+    the shape a user means when they attach a file and immediately explain it.
+
+    Only plain text is folded in: another media message keeps the existing
+    "different kind — flush and start over" semantics, and the text must still
+    pass the policy gate (in a group that means it needs its own @-mention), so
+    this cannot merge a message the bot was not allowed to see.
+    """
 
 
 @dataclass
